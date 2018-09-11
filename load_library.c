@@ -13,20 +13,36 @@
 #include "remote.h"
 
 
-struct memory_map_node {
-    struct memory_map_node *next;
+struct memory_segment {
+    struct memory_segment *next;
     struct memory_map map;
 };
 
 struct library {
     const char *path;
-    struct memory_map_nodes *maps;
+    struct memory_segments *maps;
 };
 
 int __load_library(struct remote_process *info, const char *path, 
                    struct library **out_library);
 
-int load_remote_segments32(struct remote_process *tracee, Elf32_Ehdr *header)
+static void unmap_remote_segments(struct remote_process *process, 
+                                  struct memory_segment *head)
+{
+    /* Cleanup the list if we've failed. */
+    while (head) {
+        struct memory_segment *node = head->next;
+
+        /* if we've failed, unmap the mapping. */
+        (void) remote_munmap(process, (uint64_t) head->map.addr, 
+                             head->map.size);
+
+        free(head);
+        head = node;
+    }
+}
+
+static int map_remote_segments32(struct remote_process *tracee, Elf32_Ehdr *header)
 {
     /* TODO */
     return -ENOSYS;
@@ -39,8 +55,8 @@ int load_remote_segments32(struct remote_process *tracee, Elf32_Ehdr *header)
  * @header: a pointer to a localy memory mapping of the library we're loading.
  *
  * return how many segments were loaded. or <0 on failure. */
-int load_remote_segments64(struct remote_process *tracee, int remote_fd, Elf64_Ehdr *header,
-                           struct memory_map_node **out_head, uint64_t *vaddr_base)
+static int map_remote_segments64(struct remote_process *tracee, int remote_fd, Elf64_Ehdr *header,
+                                  struct memory_segment **out_head, uint64_t *vaddr_base)
 {
     int ret = 0, segments = 0;
     int prot = 0;
@@ -49,13 +65,22 @@ int load_remote_segments64(struct remote_process *tracee, int remote_fd, Elf64_E
     size_t size;
     uint64_t offset;
     uint64_t base = 0, vaddr = 0;
-    struct memory_map_node *head = NULL;
-    struct memory_map_node *node = NULL;
+    struct memory_segment *head = NULL;
+    struct memory_segment *node = NULL;
     struct memory_map remote_map;
 
     program_header = (Elf64_Phdr *) ((char *) header + header->e_phoff);
     num_phdrs = header->e_phnum;
 
+    /* TODO:
+     * The glibc programers are smart people.. they are mmap()ing
+     * a single contigues region for all the PT_LOAD segments,
+     * they're assumming the holes(gaps) are small enough that it'll be
+     * worth it, since no complicated book-keeping(like a the list here)
+     * is needed.
+     *
+     * Consider following that approach instead of using a list.
+     */
     for (; num_phdrs--; ++program_header) {
         if (program_header->p_type != PT_LOAD)
             continue;
@@ -136,18 +161,8 @@ int load_remote_segments64(struct remote_process *tracee, int remote_fd, Elf64_E
 
 out:
 
-    if (ret < 0) {
-        /* Cleanup the list if we've failed. */
-        while (head) {
-                /* if we've failed, unmap the mapping. */
-                remote_munmap(tracee, (uint64_t) head->map.addr, 
-                              head->map.size);
-
-            node = head->next;
-            free(head);
-            head = node;
-        }
-    }
+    if (ret < 0)
+        unmap_remote_segments(tracee, head);
 
     return ret;
 }
@@ -200,13 +215,14 @@ static bool validate_elf(Elf64_Ehdr *header)
     return true;
 }
 
+/* TODO */
 static int fix_remote_relocations(struct remote_process *remote, 
                                   Elf64_Ehdr *header, uint64_t vaddr_base)
 {
-    
+    /* TODO. Recursively call __load_library() to resolve all
+     * shared object dependencies. */
 
-
-
+    return -ENOSYS;
 }
 
 /*
@@ -224,7 +240,7 @@ int __load_library(struct remote_process *info, const char *path,
     struct memory_map map;
     Elf64_Ehdr *header = NULL;
     uint64_t vaddr_base = 0;
-    struct memory_map_node *head = NULL;
+    struct memory_segment *head = NULL;
 
     *out_library = NULL;
 
@@ -248,12 +264,12 @@ int __load_library(struct remote_process *info, const char *path,
     /* Load all PT_LOAD segments into the remote process. */
     switch (header->e_ident[EI_CLASS]) {
     case 1: /* 32 bit */
-        ret = load_remote_segments32(info, (Elf32_Ehdr *) header);
+        ret = map_remote_segments32(info, (Elf32_Ehdr *) header);
         break;
     case 2: /* 64 bit */
-        ret = load_remote_segments64(info, remote_fd, header, &head, &vaddr_base);
+        ret = map_remote_segments64(info, remote_fd, header, &head, &vaddr_base);
         break;
-    ;efault:
+    default:
         ret = -EINVAL;
         break;
     }
@@ -263,8 +279,6 @@ int __load_library(struct remote_process *info, const char *path,
         goto out;
     }
 
-    /* TODO: Now, after we've mapped all the loadable segments, fix
-     * the relocations. We're assuming the last*/
     ret = fix_remote_relocations(info, header, vaddr_base);
     if (ret != 0)
         goto out;
@@ -280,22 +294,8 @@ out:
     if (map.addr)
         munmap(map.addr, map.size);
 
-    if (ret < 0) {
-        /* TODO: If we've failed... we must 
-         * unload all the libraries we loaded.. */
-
-        /* Cleanup the list if we've failed. */
-        while (head) {
-            struct memory_map_node *node = head->next;
-
-            /* if we've failed, unmap the mapping. */
-            remote_munmap(info, (uint64_t) head->map.addr, 
-                          head->map.size);
-
-            free(head);
-            head = node;
-        }
-    }
+    if (ret < 0)
+        unmap_remote_segments(info, head);
 
     return ret;
 }

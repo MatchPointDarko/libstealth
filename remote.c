@@ -358,13 +358,21 @@ int init_remote_process(struct remote_process *info, pid_t pid)
     if (ret == -1)
         return -errno;
 
+    ret = waitpid(pid, NULL, 0);
+    if (ret == -1) {
+        ret = -errno;
+        goto out;
+    }
+
     ret = create_remote_syscall(info);
     if (ret != 0)
         goto out;
 
 out:
-    if (ret != 0)
-        ptrace(PTRACE_DETACH, info->pid, 0, 0);
+    if (ret != 0) {
+        (void) ptrace(PTRACE_DETACH, pid, 0, 0);
+        (void) waitpid(pid, NULL, 0);
+    }
 
     return ret;
 }
@@ -374,5 +382,6 @@ void fini_remote_process(struct remote_process *info)
     if (info->syscall_stub)
         remote_munmap(info, info->syscall_stub, getpagesize());
 
-    ptrace(PTRACE_DETACH, info->pid, 0, 0);
+    (void) ptrace(PTRACE_DETACH, info->pid, 0, 0);
+    (void) waitpid(info->pid, NULL, 0);
 }
