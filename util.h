@@ -9,6 +9,7 @@
 
 #define PAGE_ALIGN_DOWN(val) ((val) & ~(getpagesize() - 1))
 #define PAGE_ALIGN(val) (PAGE_ALIGN_DOWN(val) + getpagesize())
+#define min(a, b) (a) < (b) ? (a) : (b)
 
 struct memory_map {
     char *addr;

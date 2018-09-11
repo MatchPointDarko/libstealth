@@ -23,6 +23,9 @@ struct library {
     struct memory_map_nodes *maps;
 };
 
+int __load_library(struct remote_process *info, const char *path, 
+                   struct library **out_library);
+
 int load_remote_segments32(struct remote_process *tracee, Elf32_Ehdr *header)
 {
     /* TODO */
@@ -37,7 +40,7 @@ int load_remote_segments32(struct remote_process *tracee, Elf32_Ehdr *header)
  *
  * return how many segments were loaded. or <0 on failure. */
 int load_remote_segments64(struct remote_process *tracee, int remote_fd, Elf64_Ehdr *header,
-                           struct memory_map_node **out_head)
+                           struct memory_map_node **out_head, uint64_t *vaddr_base)
 {
     int ret = 0, segments = 0;
     int prot = 0;
@@ -62,6 +65,7 @@ int load_remote_segments64(struct remote_process *tracee, int remote_fd, Elf64_E
             continue;
 
         /* Segment protection. */
+        prot = 0;
         prot |= program_header->p_flags & PF_W ? PROT_WRITE : 0;
         prot |= program_header->p_flags & PF_R ? PROT_READ : 0;
         prot |= program_header->p_flags & PF_X ? PROT_EXEC : 0;
@@ -84,10 +88,33 @@ int load_remote_segments64(struct remote_process *tracee, int remote_fd, Elf64_E
         if (ret != 0)
             goto out;
 
-        if (base == 0)
+        /* Zero out bss locations. */
+        if (program_header->p_filesz < program_header->p_memsz) {
+            char zero_mem[1024] = { 0 };
+            uint64_t start_bss = 0;
+            long written = 0;
+            long left = program_header->p_memsz - program_header->p_filesz;
+           
+            start_bss = base + program_header->p_vaddr + program_header->p_filesz;
+            while (left) {
+
+                ret = write_process_memory(tracee, start_bss + written, zero_mem, 
+                                           min(left, sizeof(zero_mem)));
+                if (ret < 0) {
+                    goto out;
+                }
+
+                written += ret;
+                left -= ret;
+            }
+        }
+
+        if (base == 0) {
             /* If we haven't got any base yet we can safely assume
              * the first mmapped region is the lowest one. */
             base = (uint64_t) remote_map.addr;
+            *vaddr_base = base;
+        }
 
         /* Push this mapping to a list to gracefully cleanup
          * in case we've failed. we never leave leftovers in the tracee. */
@@ -105,17 +132,21 @@ int load_remote_segments64(struct remote_process *tracee, int remote_fd, Elf64_E
     }
 
     ret = segments;
-out:
-    /* Cleanup the list if we've failed. */
-    while (head) {
-        if (ret < 0)
-            /* if we've failed, unmap the mapping. */
-            remote_munmap(tracee, (uint64_t) head->map.addr, 
-                          head->map.size);
+    *out_head = head;
 
-        node = head->next;
-        free(head);
-        head = node;
+out:
+
+    if (ret < 0) {
+        /* Cleanup the list if we've failed. */
+        while (head) {
+                /* if we've failed, unmap the mapping. */
+                remote_munmap(tracee, (uint64_t) head->map.addr, 
+                              head->map.size);
+
+            node = head->next;
+            free(head);
+            head = node;
+        }
     }
 
     return ret;
@@ -169,6 +200,15 @@ static bool validate_elf(Elf64_Ehdr *header)
     return true;
 }
 
+static int fix_remote_relocations(struct remote_process *remote, 
+                                  Elf64_Ehdr *header, uint64_t vaddr_base)
+{
+    
+
+
+
+}
+
 /*
  * Load library to the remote target. This function
  * does the actual "loader" job. 
@@ -183,6 +223,7 @@ int __load_library(struct remote_process *info, const char *path,
     size_t remote_map_size = 0;
     struct memory_map map;
     Elf64_Ehdr *header = NULL;
+    uint64_t vaddr_base = 0;
     struct memory_map_node *head = NULL;
 
     *out_library = NULL;
@@ -210,9 +251,9 @@ int __load_library(struct remote_process *info, const char *path,
         ret = load_remote_segments32(info, (Elf32_Ehdr *) header);
         break;
     case 2: /* 64 bit */
-        ret = load_remote_segments64(info, remote_fd, header, &head);
+        ret = load_remote_segments64(info, remote_fd, header, &head, &vaddr_base);
         break;
-    default:
+    ;efault:
         ret = -EINVAL;
         break;
     }
@@ -223,9 +264,13 @@ int __load_library(struct remote_process *info, const char *path,
     }
 
     /* TODO: Now, after we've mapped all the loadable segments, fix
-     * the relocations. */
+     * the relocations. We're assuming the last*/
+    ret = fix_remote_relocations(info, header, vaddr_base);
+    if (ret != 0)
+        goto out;
 
     /* TODO: Call init functions. */
+    // ret = call_init_functions(info, header);
 
     /* We're good to go. */
 out:
@@ -238,6 +283,18 @@ out:
     if (ret < 0) {
         /* TODO: If we've failed... we must 
          * unload all the libraries we loaded.. */
+
+        /* Cleanup the list if we've failed. */
+        while (head) {
+            struct memory_map_node *node = head->next;
+
+            /* if we've failed, unmap the mapping. */
+            remote_munmap(info, (uint64_t) head->map.addr, 
+                          head->map.size);
+
+            free(head);
+            head = node;
+        }
     }
 
     return ret;

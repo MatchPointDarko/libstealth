@@ -205,7 +205,7 @@ int remote_mmap(struct remote_process *info, void *addr, size_t len, int prot,
     if (ret < 0)
         return ret;
 
-    map->addr = (char *) map;
+    map->addr = (char *) ret;
     map->size = len;
 
     return 0;

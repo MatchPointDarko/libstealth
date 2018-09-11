@@ -24,4 +24,9 @@ long remote_munmap(struct remote_process *info, uint64_t addr, size_t len);
 long remote_open(struct remote_process *info, const char *path, int options);
 long remote_close(struct remote_process *info, int remote_fd);
 
+int write_process_memory(struct remote_process *process, uint64_t address,
+                         const void *buf, size_t bufsize);
+int read_process_memory(struct remote_process *process, uint64_t address,
+                        void *buf, size_t bufsize);
+
 #endif
