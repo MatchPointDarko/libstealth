@@ -28,5 +28,6 @@ int write_process_memory(struct remote_process *process, uint64_t address,
                          const void *buf, size_t bufsize);
 int read_process_memory(struct remote_process *process, uint64_t address,
                         void *buf, size_t bufsize);
-
+int remote_strcpy(struct remote_process *remote, char *dest, 
+                  const char *source);
 #endif
