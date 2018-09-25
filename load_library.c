@@ -12,27 +12,21 @@
 
 #include "util.h"
 #include "remote.h"
+#include "load_library_priv.h"
+#include "sym_hashtable.h"
 
-
-struct memory_segment {
-    struct memory_segment *next;
-    struct memory_map map;
-};
-
-struct elf_section {
-    uint64_t vaddr;
-    size_t size;
-    size_t entrysize;
-};
 
 struct dyn_library {
     pid_t pid;
     char path[PATH_MAX+1];            /* Path of the shared object. */
-    struct memory_segment *maps;      /* List of memory mappings that belong to this library. */
+    struct memory_map remote_map;     /* Remote memory mapping of the library. */
     struct dyn_library **depends;     /* An array of libraries this library depends on. */
     size_t depends_size;              /* Size of the dependencies array. */ 
     size_t refcnt;                    /* Reference count, who is dependent on this library. */
     uint64_t fini_vaddr;              /* Address of the FINI function pointers table. */
+    struct sym_hashtable hash_table;
+    struct elf_section string_table;
+    struct elf_section symbol_table;
 };
 
 struct dyn_library_node {
@@ -45,21 +39,6 @@ int __load_library(struct remote_process *info, const char *path,
                    struct dyn_library **out_library);
 void __unload_library(struct remote_process *remote, struct dyn_library *library);
 
-static void unmap_remote_segments(struct remote_process *process, 
-                                  struct memory_segment *head)
-{
-    /* Cleanup the list if we've failed. */
-    while (head) {
-        struct memory_segment *node = head->next;
-
-        /* if we've failed, unmap the mapping. */
-        (void) remote_munmap(process, (uint64_t) head->map.addr, 
-                             head->map.size);
-
-        free(head);
-        head = node;
-    }
-}
 
 static int map_remote_segments32(struct remote_process *tracee, Elf32_Ehdr *header)
 {
@@ -74,32 +53,50 @@ static int map_remote_segments32(struct remote_process *tracee, Elf32_Ehdr *head
  * @header: a pointer to a localy memory mapping of the library we're loading.
  *
  * return how many segments were loaded. or <0 on failure. */
-static int map_remote_segments64(struct remote_process *tracee, int remote_fd, Elf64_Ehdr *header,
-                                  struct memory_segment **out_head, uint64_t *vaddr_base)
+static int map_remote_segments64(struct remote_process *tracee, int remote_fd, 
+                                 Elf64_Ehdr *header, struct memory_map *remote_map)
 {
-    int ret = 0, segments = 0;
+    int ret = 0;
     int prot = 0;
     Elf64_Phdr *program_header = NULL;    
     size_t num_phdrs = 0;
-    size_t size;
-    uint64_t offset;
-    uint64_t base = 0, vaddr = 0;
-    struct memory_segment *head = NULL;
-    struct memory_segment *node = NULL;
-    struct memory_map remote_map;
+    size_t size = 0;
+    uint64_t offset = 0;
+    uint64_t base = 0;
+    uint64_t last_end_vaddr = 0, vaddr = 0;
+    struct memory_map segment_map;
 
     program_header = (Elf64_Phdr *) ((char *) header + header->e_phoff);
     num_phdrs = header->e_phnum;
 
-    /* TODO:
-     * The glibc programers are smart people.. they are mmap()ing
-     * a single contigues region for all the PT_LOAD segments,
-     * they're assumming the holes(gaps) are small enough that it'll be
-     * worth it, since no complicated book-keeping(like a the list here)
-     * is needed.
-     *
-     * Consider following that approach instead of using a list.
-     */
+    for (; num_phdrs--; ++program_header) {
+        if (program_header->p_type != PT_LOAD)
+            continue;
+
+        if (program_header->p_memsz == 0)
+            continue;
+
+        size += program_header->p_memsz;
+        size += program_header->p_vaddr - last_end_vaddr;
+
+        last_end_vaddr = program_header->p_vaddr + program_header->p_memsz;
+    }
+
+    if (size == 0)
+        return -EINVAL;
+
+    /* Do the remote mmap. We allocate a single chunk
+     * hoping that the gaps between PT_LOAD segments are small
+     * enough that it'll be worth it. instead of bookkeeping a list
+     * of segments. */
+    ret = remote_mmap(tracee, NULL, size, PROT_NONE,
+                      MAP_PRIVATE, remote_fd, offset, remote_map);
+    if (ret != 0)
+        goto out;
+
+    base = (uint64_t) remote_map->addr;
+    program_header = (Elf64_Phdr *) ((char *) header + header->e_phoff);
+    num_phdrs = header->e_phnum;
     for (; num_phdrs--; ++program_header) {
         if (program_header->p_type != PT_LOAD)
             continue;
@@ -128,7 +125,7 @@ static int map_remote_segments64(struct remote_process *tracee, int remote_fd, E
 
         /* Do the remote mmap. */
         ret = remote_mmap(tracee, (void *) vaddr, size, prot,
-                          MAP_PRIVATE, remote_fd, offset, &remote_map);
+                          MAP_PRIVATE | MAP_FIXED, remote_fd, offset, &segment_map);
         if (ret != 0)
             goto out;
 
@@ -152,34 +149,20 @@ static int map_remote_segments64(struct remote_process *tracee, int remote_fd, E
                 left -= ret;
             }
         }
-
-        if (base == 0) {
-            /* If we haven't got any base yet we can safely assume
-             * the first mmapped region is the lowest one. */
-            base = (uint64_t) remote_map.addr;
-            *vaddr_base = base;
-        }
-
-        node = malloc(sizeof(*head));
-        if (node == NULL) {
-            ret = -ENOMEM;
-            goto out;
-        }
-
-        node->map = remote_map;
-        node->next = head;
-        head = node;
-
-        ++segments;
     }
 
-    ret = segments;
-    *out_head = head;
+    ret = 0;
 
 out:
+    if (ret < 0) {
+        if (remote_map->addr != NULL) {
+            (void) remote_munmap(tracee, (uint64_t) remote_map->addr, 
+                                 remote_map->size);
 
-    if (ret < 0)
-        unmap_remote_segments(tracee, head);
+            remote_map->addr = NULL;
+            remote_map->size = 0;
+        }
+    }
 
     return ret;
 }
@@ -313,10 +296,12 @@ load_success:
             goto failed;
         }
 
-        loaded_lib->library = depends[idx];
+        loaded_lib->library = depends[idx++];
         loaded_lib->next = *loaded_libs;
         *loaded_libs = loaded_lib;
     }
+
+    return 0;
 
 failed:
     for (int i = 0; i < idx; i++) {
@@ -329,33 +314,80 @@ failed:
     return ret;
 }
 
+/* Iterate over the symbol table, and resolve symbols. */
 static int resolve_symbols(struct remote_process *remote,
                            struct dyn_library **depends,
                            size_t depends_size, 
                            struct elf_section *string_table, 
-                           struct elf_section *symbol_table)
+                           struct elf_section *symbol_table,
+                           struct elf_section *hash_table)
 {
-    /* Iterate over the symbol table, look for unresolved
-     * symbols. */
-    
+    int ret = 0;
+    size_t num_syms = 0;
+    Elf64_Sym *symbol = 0;
 
+    num_syms = symbol_table->size / symbol_table->entrysize;
+    symbol = (Elf64_Sym *) symbol_table->local_vaddr;
 
+    /* Skip the first symbol. */
+    for (int i = 1; i < num_syms; i++) {
+        if (symbol[i].st_shndx == SHN_UNDEF) {
+            char *sym = NULL;
+            uint64_t sym_val = 0;
+            
+            sym = (char *) string_table->local_vaddr + symbol[i].st_name;
+
+            /* Search for the symbol address in all the depends. */
+            for (int j = 0; j < depends_size; j++) {
+                //sym_val = symbol_find(depends[j], sym);
+                if (sym_val)
+                    break;
+            }
+
+            if (sym_val) {
+                continue;
+            } else if (!symbol[i].st_info & STB_WEAK) {
+                /* If this isn't a weak symbol and we couldn't resolve it,
+                 * fail. */
+                return -EINVAL;
+            }
+        }
+    }
+}
+
+static int elf_section_local_map(struct remote_process *remote, 
+                                 struct elf_section *section)
+{
+    int ret = 0;
+    struct memory_map map;
+
+    ret = remote_vma_map(remote, section->vaddr, section->size, &map);
+    if (ret < 0)
+        return ret;
+
+    section->local_vaddr = (uint64_t) map.addr;
+
+    return 0;
 }
 
 static int do_dynamic_linking(struct remote_process *remote, 
                               struct dyn_library_node **loaded_libs,
                               Elf64_Ehdr *header, uint64_t vaddr_base,
                               struct dyn_library ***depends, size_t *depends_size,
-                              uint64_t *fini_vaddr)
+                              uint64_t *fini_vaddr, struct sym_hashtable *sym_hashtable,
+                              struct elf_section *string_table, 
+                              struct elf_section *symbol_table)
+
 {
     int ret = 0;
     int needed_libs = 0;
+    int hash_type = 0;
     Elf64_Phdr *program_header = NULL;    
+    Elf64_Word *symtab_size = 0;
     Elf64_Dyn *dyn_segment = NULL;
     Elf64_Dyn *plt = NULL, *gdt = NULL;
     size_t num_phdrs = 0;
-    struct elf_section string_table = { 0 };
-    struct elf_section symbol_table = { 0 };
+    struct elf_section hash_table = { 0 };
 
     *depends_size = 0;
     *depends = NULL;
@@ -381,19 +413,56 @@ static int do_dynamic_linking(struct remote_process *remote,
             ++*depends_size;
         break;
         case DT_STRTAB:
-            string_table.vaddr = vaddr_base + dyn_segment->d_un.d_ptr;
+            string_table->vaddr = vaddr_base + dyn_segment->d_un.d_ptr;
         break;
         case DT_STRSZ:
-            string_table.size = dyn_segment->d_un.d_val;
+            string_table->size = dyn_segment->d_un.d_val;
         break;
         case DT_SYMTAB:
-            symbol_table.vaddr = vaddr_base + dyn_segment->d_un.d_ptr;
+            symbol_table->vaddr = vaddr_base + dyn_segment->d_un.d_ptr;
         break;
         case DT_SYMENT:
-            symbol_table.entrysize = dyn_segment->d_un.d_val;
+            symbol_table->entrysize = dyn_segment->d_un.d_val;
+        break;
+        case DT_HASH:
+            if (hash_type != DT_GNU_HASH) {
+                hash_type = DT_HASH;
+                hash_table.vaddr = dyn_segment->d_un.d_val;
+            }
+        break;
+        case DT_GNU_HASH:
+            hash_type = DT_GNU_HASH;
+            hash_table.vaddr = dyn_segment->d_un.d_val;
         break;
         }
     }
+
+    /* Check that all the mandatory sections are available. */
+    if (string_table->vaddr == 0 || string_table->size == 0 ||
+        symbol_table->vaddr == 0 || symbol_table->entrysize == 0 ||
+        hash_table.vaddr == 0) {
+        ret = -EINVAL;
+        goto fail;
+    }
+
+    ret = elf_section_local_map(remote, &hash_table);
+    if (ret < 0)
+        goto fail;
+
+    init_sym_hashtable(sym_hashtable, &hash_table, hash_type);
+
+    /* Map all remote sections localy. */
+    ret = elf_section_local_map(remote, string_table);
+    if (ret < 0)
+        goto fail;
+
+    ret = elf_section_local_map(remote, symbol_table);
+    if (ret < 0)
+        goto fail;
+
+    /* Get the size of the symbol table using the hash table
+     * number of entries. */
+    symbol_table->size = sym_hashtable->nchains * symbol_table->entrysize;
 
     if (*depends_size) {
         *depends = calloc(1, *depends_size * sizeof(struct dyn_library *));
@@ -405,12 +474,13 @@ static int do_dynamic_linking(struct remote_process *remote,
         /* Load all the needed libraries. */
         dyn_segment = (Elf64_Dyn *) ((char *) header + program_header->p_offset);
         ret = load_dependencies(remote, loaded_libs, dyn_segment, 
-                                *depends, &string_table);
+                                *depends, string_table);
         if (ret < 0)
             goto fail;
 
         /* Resolve symbols. */
-        ret = resolve_symbols(remote, *depends, *depends_size, &string_table, &symbol_table);
+        ret = resolve_symbols(remote, *depends, *depends_size, 
+                              string_table, symbol_table, &hash_table);
         if (ret < 0)
             goto unload;
 
@@ -431,11 +501,25 @@ unload:
         __unload_library(remote, (*depends)[i]);
 
 fail:
+    *depends_size = 0;
+
     if (*depends) {
-        *depends_size = 0;
         free(*depends);
         *depends = NULL;
     }
+
+    if (string_table->local_vaddr) {
+        munmap((void *) string_table->local_vaddr, string_table->size);
+        string_table->local_vaddr = string_table->vaddr = 0;
+        string_table->size = 0;
+    }
+    if (symbol_table->local_vaddr) {
+        munmap((void *) symbol_table->local_vaddr, symbol_table->size);
+        symbol_table->local_vaddr = symbol_table->vaddr = 0;
+        symbol_table->size = 0;
+    }
+    if (hash_table.local_vaddr)
+        munmap((void *) hash_table.local_vaddr, hash_table.size);
 
     return ret;
 }
@@ -457,16 +541,16 @@ int __load_library(struct remote_process *info, const char *path,
 {
     int ret = 0;
     int remote_fd = 0;
-    void *remote_map = NULL;
-    size_t remote_map_size = 0;
     struct memory_map map;
+    struct memory_map remote_map;
     Elf64_Ehdr *header = NULL;
-    uint64_t vaddr_base = 0;
-    struct memory_segment *head = NULL;
     struct dyn_library *library = NULL;
     struct dyn_library **depends = NULL;
     size_t depends_size = 0;
     uint64_t fini_vaddr = 0;
+    struct elf_section string_table = { 0 };
+    struct elf_section symbol_table = { 0 };
+    struct sym_hashtable sym_hashtable = { 0 };
 
     *out_library = NULL;
 
@@ -505,20 +589,19 @@ int __load_library(struct remote_process *info, const char *path,
         ret = map_remote_segments32(info, (Elf32_Ehdr *) header);
         break;
     case 2: /* 64 bit */
-        ret = map_remote_segments64(info, remote_fd, header, &head, &vaddr_base);
+        ret = map_remote_segments64(info, remote_fd, header, &remote_map);
         break;
     default:
         ret = -EINVAL;
         break;
     }
 
-    if (ret <= 0) {
-        ret = ret == 0 ? -EINVAL : ret;
+    if (ret < 0)
         goto out;
-    }
 
-    ret = do_dynamic_linking(info, loaded_libs, header, vaddr_base, 
-                             &depends, &depends_size, &fini_vaddr);
+    ret = do_dynamic_linking(info, loaded_libs, header, (uint64_t) remote_map.addr, 
+                             &depends, &depends_size, &fini_vaddr,
+                             &sym_hashtable, &string_table, &symbol_table);
     if (ret != 0)
         goto out;
 
@@ -531,10 +614,13 @@ int __load_library(struct remote_process *info, const char *path,
 
     strncpy(library->path, path, PATH_MAX);
     library->pid = info->pid;
-    library->maps = head;
+    library->remote_map = remote_map;
     library->depends = depends;
     library->depends_size = depends_size;
     library->fini_vaddr = fini_vaddr;
+    library->hash_table = sym_hashtable;
+    library->string_table = string_table;
+    library->symbol_table = symbol_table;
 
     *out_library = library;
 out:
@@ -545,7 +631,9 @@ out:
         munmap(map.addr, map.size);
 
     if (ret < 0) {
-        unmap_remote_segments(info, head);
+        if (remote_map.addr != NULL)
+            (void) remote_munmap(info, (uint64_t) remote_map.addr, 
+                                 remote_map.size);
 
         if (library)
             free(library);
@@ -568,13 +656,15 @@ void __unload_library(struct remote_process *remote,
         __unload_library(remote, library->depends[i]);
     }
 
-    if (--library->refcnt == 0) {
+    if (library->refcnt == 0) {
         /* TODO: Call fini */
 
-        unmap_remote_segments(remote, library->maps);
+        remote_munmap(remote, (uint64_t) library->remote_map.addr, 
+                      library->remote_map.size);
         free(library->depends);
         free(library);
-    }
+    } else
+        library->refcnt--;
 }
 
 int unload_library(struct dyn_library *library)
@@ -618,7 +708,15 @@ out:
         __unload_library(&info, *out_library);
         *out_library = NULL;
     }
-        
+
+    /* free the loaded libs */
+    while (loaded_libs) {
+        struct dyn_library_node *safe = loaded_libs->next;
+
+        free(loaded_libs);
+        loaded_libs = safe;
+    }
+
     fini_remote_process(&info);
 
     return ret;
@@ -634,6 +732,7 @@ int main(int argc, char **argv)
     }
 
     load_library(atoi(argv[1]), "/home/mike/foo.so", &library);
+    unload_library(library);
 
     return 0;
 }

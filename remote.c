@@ -200,6 +200,9 @@ int remote_mmap(struct remote_process *info, void *addr, size_t len, int prot,
 {
     long ret = 0;
 
+    map->addr = NULL;
+    map->size = 0;
+
     ret = remote_syscall(info, SYS_mmap, (uint64_t) addr, len, 
                          prot, flags, fildes, off);
     if (ret < 0)
@@ -239,6 +242,42 @@ long remote_open(struct remote_process *info, const char *path, int options)
 long remote_close(struct remote_process *info, int remote_fd)
 {
     return remote_syscall(info, SYS_close, remote_fd, 0, 0, 0, 0, 0);
+}
+
+int remote_vma_map(struct remote_process *info, uint64_t addr, 
+                   size_t size, struct memory_map *map)
+{
+    int ret = 0;
+    void *mapping = MAP_FAILED;
+    int fd = -1;
+    char path[PATH_MAX+1];
+
+    map->addr = NULL;
+    map->size = 0;
+
+    snprintf(path, sizeof(path), "/proc/%d/maps", info->pid);
+
+    fd = open(path, O_RDONLY);
+    if (fd == -1)
+        return -errno;
+
+    mapping = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, addr);
+    if (mapping == MAP_FAILED) {
+        ret = -errno;
+        goto out;
+    }
+
+    map->addr = mapping;
+    map->size = size;
+
+out:
+    if (fd != -1)
+        close(fd);
+
+    if (ret && mapping != MAP_FAILED)
+        munmap(mapping, size);
+
+    return ret;
 }
 
 static int create_remote_syscall(struct remote_process *info)
