@@ -2,6 +2,8 @@
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
+#include <stdarg.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <sys/mman.h>
@@ -15,10 +17,45 @@
 #include "remote.h"
 
 
-/* System call stub currently __x86_64 only__. */
-static unsigned char syscall_stub[] = {
-    0x0f, 0x05 /* syscall */
-};
+/* Arch-specific external declarations */
+struct function_call;
+extern char syscall_stub[];
+extern int syscall_stub_size;
+
+/* 
+ * Changes the instruction pointer to the stub address,
+ * and marshall the system call arguments. 
+ */
+extern int marshall_syscall(pid_t pid, uint64_t stub_address, 
+                                 uint32_t syscall_number, uint64_t arg1, 
+                                 uint64_t arg2, uint64_t arg3, uint64_t arg4, 
+                                 uint64_t arg5, uint64_t arg6);
+/* 
+ * Returns the syscall return value(shocking..) 
+ */
+extern long syscall_return_value(pid_t pid);
+/* 
+ * Get a snapshot of the current remote process registers values. 
+ */
+extern int get_remote_regs(pid_t pid, struct user_regs_struct **regs);
+/* 
+ * Set the remote process registers values. 
+ */
+extern int set_remote_regs(pid_t pid, struct user_regs_struct *regs);
+/*
+ * Change the instruction pointer to the function address,
+ * set the function return address, and marshall the function argumenst.
+ */
+extern int wind_function_call(pid_t pid, uint64_t func_addr, uint64_t return_addr, 
+                              struct function_call **out_call, ...);
+/* 
+ * Unwind whatever was winded for the function call. 
+ */
+extern int unwind_function_call(pid_t pid, struct function_call *call);
+/*
+ * Get the function return value. 
+ */
+extern uint64_t get_function_return_value(pid_t pid);
 
 /*
  * Assumes the tracee is in a trace-stop state(suspended)
@@ -104,10 +141,7 @@ static long do_remote_syscall(pid_t pid,
 {
     long ret = 0;
     int status = 0;
-    ssize_t written = 0;
-    struct user_regs_struct orig_regs;
-    struct user_regs_struct regs;
-    int bytes_read;
+    struct user_regs_struct *orig_regs = NULL;
 
     ret = ptrace(PTRACE_GETREGS, pid, NULL, &orig_regs);
     if (ret == -1) {
@@ -115,30 +149,14 @@ static long do_remote_syscall(pid_t pid,
         goto out;
     }
 
-    regs = orig_regs;
-
-    /* TODO: Make this portable. For now, we only support
-     * x86_64. */
-
-    /* syscall number */
-    regs.rax = syscall_number;
-
-    /* Modify the instruction pointer to point to the stub address. */
-    regs.rip = stub_address;
-
-    /* arguments */
-    regs.rdi = arg1;
-    regs.rsi = arg2;
-    regs.rdx = arg3;
-    regs.r10 = arg4;
-    regs.r8 = arg5;
-    regs.r9 = arg6;
-
-    ret = ptrace(PTRACE_SETREGS, pid, NULL, &regs);
-    if (ret == -1) {
-        ret = -errno;
+    ret = get_remote_regs(pid, &orig_regs);
+    if (ret < 0)
         goto out;
-    }
+
+    ret = marshall_syscall(pid, stub_address, syscall_number, 
+                           arg1, arg2, arg3, arg4, arg5, arg6);
+    if (ret < 0)
+        goto out;
 
     /* Now we have the remote thread pointing to our stub. 
      * Let it execute and catch the SIGTRAP in the end. */
@@ -160,20 +178,14 @@ static long do_remote_syscall(pid_t pid,
             /* Validate this is indeed a SIGTRAP. */
             if (unlikely(WSTOPSIG(status) != SIGTRAP)) {
                 /* Hmmmm...  someone else stopped it? anyhow,
-                 * this is not expected. */
+                 * this is not expected... */
                 ret = -EINVAL;
                 goto restore_regs;
             }
 
             /* Nice.. let's collect the syscall return value and be 
              * done with it. */
-            ret = ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-            if (ret == -1) {
-                ret = -errno;
-                goto restore_regs;
-            }
-
-            ret = regs.rax;
+            ret = syscall_return_value(pid);
 
             /* We're now in signal-delivery-stop. Supress the SIGTRAP
              * signal by issuing a ptrace restart. */
@@ -182,7 +194,8 @@ static long do_remote_syscall(pid_t pid,
     }
 
 restore_regs:
-    (void) ptrace(PTRACE_SETREGS, pid, NULL, &orig_regs);
+    set_remote_regs(pid, orig_regs);
+    free(orig_regs);
 out:
     return ret;
 }
@@ -254,7 +267,7 @@ static int create_remote_syscall(struct remote_process *info)
     char exepath[PATH_MAX + 1] = { 0 };
     Elf64_Ehdr header;
     uint64_t entry_point = 0;
-    uint8_t orig_content[sizeof(syscall_stub)];
+    uint8_t orig_content[syscall_stub_size];
 
     /* Copy the syscall stub, and call mmap() to create a remote
      * dispatch stub */
@@ -276,7 +289,7 @@ static int create_remote_syscall(struct remote_process *info)
         goto out;
     }
 
-    if (bytes_read < sizeof(header)) {
+    if ((size_t) bytes_read < sizeof(header)) {
         /* Hmm... this is weird. */
         ret = -EBADFD;
         goto out;
@@ -306,7 +319,7 @@ static int create_remote_syscall(struct remote_process *info)
      */
     bytes_written = write_process_memory(info, entry_point, 
                                          syscall_stub, 
-                                         sizeof(syscall_stub));
+                                         syscall_stub_size);
     if (bytes_written < 0) {
         ret = bytes_written;
         goto out;
@@ -327,15 +340,15 @@ static int create_remote_syscall(struct remote_process *info)
      * dealing with multithreaded programs that execute code while
      * we changed it) */
     bytes_written = write_process_memory(info, syscall_ret, 
-                                         syscall_stub, sizeof(syscall_stub));
+                                         syscall_stub, syscall_stub_size);
     if (bytes_written < 0) {
         ret = bytes_written;
         goto restore;
     }
 
     info->syscall_stub = syscall_ret;
-    info->remote_map_addr = info->syscall_stub + sizeof(syscall_stub);
-    info->remote_map_size = getpagesize() - sizeof(syscall_stub);
+    info->remote_map_addr = info->syscall_stub + syscall_stub_size;
+    info->remote_map_size = getpagesize() - syscall_stub_size;
 
 restore:
     (void) write_process_memory(info, entry_point, 
@@ -347,13 +360,11 @@ out:
     return ret;
 }
 
-
 int init_remote_process(struct remote_process *info, pid_t pid)
 {
     int ret = 0;
-    int wstatus;
 
-    memset(info, sizeof(*info), 0);
+    memset(info, 0, sizeof(*info));
 
     info->pid = pid;
 
@@ -387,4 +398,84 @@ void fini_remote_process(struct remote_process *info)
 
     (void) ptrace(PTRACE_DETACH, info->pid, 0, 0);
     (void) waitpid(info->pid, NULL, 0);
+}
+
+uint64_t call_remote_function(pid_t pid, uint64_t func_addr, ...)
+{
+    uint64_t ret = 0;
+    int err = 0;
+    int status;
+    va_list args;
+    struct function_call *call = NULL;
+
+    va_start(args, func_addr);
+    err = wind_function_call(pid, func_addr, 0, &call, args);
+    va_end(args);
+    if (err < 0) {
+        ret = (uint64_t) err;
+        goto out;
+    }
+
+    /* OK.. continue. */
+    err = ptrace(PTRACE_CONT, pid, NULL, NULL);
+    if (err < 0) {
+        ret = (uint64_t) err; 
+        goto unwind;
+    }
+
+    /* Wait and catch a SIGSEGV. */
+    for (;;) {
+        err = waitpid(pid, &status, 0);
+        if (err == -1) {
+            ret = (uint64_t) -errno;
+            goto unwind;
+        }
+
+        /* Check if the reason we've returned is SIGSEGV. */
+        if (WIFSTOPPED(status)) {
+            /* Validate this is indeed a SIGSEGV . */
+            if (unlikely(WSTOPSIG(status) != SIGSEGV)) {
+                /* Hmmmm...  someone else stopped it? anyhow,
+                 * this is not expected. */
+                ret = (uint64_t) -EINVAL;
+                goto unwind;
+            }
+
+            /* Nice.. let's collect the syscall return value and be 
+             * done with it. We're assuming this is indeed our SIGSEGV, 
+             * and not the program's... if it is indeed the program's, 
+             * it's a bug and we don't care. */
+            err = get_function_return_value(pid);
+            ret = (uint64_t) err;
+
+            /* We're now in signal-delivery-stop. Supress the SIGSEGV
+             * signal by issuing a ptrace restart. */
+            break;
+        }
+    }
+
+unwind:
+    (void) unwind_function_call(pid, call);
+    free(call);
+out:
+    return ret;
+}
+
+uint64_t stealth_call_remote_function(pid_t pid, uint64_t func_addr, ...)
+{
+    int ret = 0;
+    va_list args;
+    struct remote_process remote = { 0 };
+
+    ret = init_remote_process(&remote, pid);
+    if (ret < 0)
+        return ret;
+
+    va_start(args, func_addr);
+    ret = call_remote_function(pid, func_addr, args);
+    va_end(args);
+
+    fini_remote_process(&remote);
+
+    return ret;
 }

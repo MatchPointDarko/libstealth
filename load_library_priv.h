@@ -3,6 +3,9 @@
 
 #include <stdlib.h>
 #include <stdint.h>
+#include <elf.h>
+
+#include "remote.h"
 
 struct elf_section {
     uint64_t type;
@@ -12,4 +15,6 @@ struct elf_section {
     size_t entrysize;
 };
 
+int fix_relocation(struct remote_process *remote, Elf64_Rel *rel, 
+                   Elf64_Sym *sym, uint64_t base);
 #endif

@@ -11,6 +11,7 @@
 #define PAGE_ALIGN(val) (PAGE_ALIGN_DOWN(val) + getpagesize())
 #define min(a, b) (a) < (b) ? (a) : (b)
 #define ARRAYSIZE(arr) (sizeof(arr) / sizeof(arr[0]))
+#define UNUSED(exp) (void) (exp)
 
 struct memory_map {
     char *addr;

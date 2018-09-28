@@ -4,6 +4,8 @@
 #include <sys/types.h>
 #include <stdint.h>
 
+#include "util.h"
+
 struct remote_process {
     pid_t pid;
 
@@ -28,4 +30,6 @@ int write_process_memory(struct remote_process *process, uint64_t address,
                          const void *buf, size_t bufsize);
 int read_process_memory(struct remote_process *process, uint64_t address,
                         void *buf, size_t bufsize);
+uint64_t call_remote_function(pid_t pid, uint64_t func_addr, ...);
+
 #endif
