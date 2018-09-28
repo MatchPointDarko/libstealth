@@ -1,8 +1,11 @@
+#include <elf.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/utsname.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <string.h>
 
 #include "util.h"
 
@@ -47,4 +50,25 @@ out:
             munmap(mapping, statbuf.st_size);
 
     return ret;
+}
+
+/* Return the running machine type in Elf format. */
+uint16_t get_machine_type(void)
+{
+    int ret;
+    int length = 0;
+    struct utsname utsname;
+
+    ret = uname(&utsname);
+    if (ret == -1)
+        return -errno;
+
+    length = strlen(utsname.machine);
+
+    if (strncmp("x86_64", utsname.machine, length) == 0) {
+        return EM_X86_64;
+    } else {
+        /* Unsupported.. */
+        return -EINVAL;
+    }
 }

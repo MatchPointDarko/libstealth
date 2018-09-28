@@ -28,6 +28,4 @@ int write_process_memory(struct remote_process *process, uint64_t address,
                          const void *buf, size_t bufsize);
 int read_process_memory(struct remote_process *process, uint64_t address,
                         void *buf, size_t bufsize);
-int remote_vma_map(struct remote_process *info, uint64_t addr, 
-                   size_t size, struct memory_map *map);
 #endif

@@ -10,6 +10,7 @@
 #define PAGE_ALIGN_DOWN(val) ((val) & ~(getpagesize() - 1))
 #define PAGE_ALIGN(val) (PAGE_ALIGN_DOWN(val) + getpagesize())
 #define min(a, b) (a) < (b) ? (a) : (b)
+#define ARRAYSIZE(arr) (sizeof(arr) / sizeof(arr[0]))
 
 struct memory_map {
     char *addr;
@@ -17,5 +18,6 @@ struct memory_map {
 };
 
 int local_mmap(struct memory_map *map, const char *path, int prot);
+uint16_t get_machine_type(void);
 
 #endif

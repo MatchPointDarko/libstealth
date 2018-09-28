@@ -5,8 +5,9 @@
 #include <stdint.h>
 
 struct elf_section {
+    uint64_t type;
     uint64_t vaddr;       /* Virtual address in the remote process. */
-    uint64_t local_vaddr; /* Virtual address in this process. */
+    char *local_vaddr;    /* Local mapping of the section. */
     size_t size;
     size_t entrysize;
 };
