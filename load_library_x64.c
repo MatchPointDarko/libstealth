@@ -32,10 +32,6 @@ int fix_relocation(struct remote_process *remote,
     case R_X86_64_64:
         value64 = base + sym->st_value + rela->r_addend;
     break;
-    case R_X86_64_TPOFF64:
-        /* TODO */
-        //value64 = base + sym->st_value + rela->r_addend - tls_offset;
-        printf("val=%llx\n", sym->st_value);
     break;
     case R_X86_64_JUMP_SLOT:
     case R_X86_64_GLOB_DAT:
@@ -44,8 +40,6 @@ int fix_relocation(struct remote_process *remote,
     case R_X86_64_RELATIVE:
         value64 = base + rela->r_addend;
     break;
-    /* TODO */
-    case R_X86_64_IRELATIVE:
     break;
     default: 
         ret = -ENOSYS;

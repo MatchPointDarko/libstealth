@@ -366,8 +366,7 @@ static int fill_elf_section(Elf64_Ehdr *header,
 static int fix_relocations(struct remote_process *remote,
                            uint64_t lib_vaddr_base,
                            struct elf_section *reloc_table,
-                           struct elf_section *symbol_table,
-                           struct elf_section *sym_hashtable)
+                           struct elf_section *symbol_table)
 {
     int ret = 0;
     char *reloc = NULL;
@@ -393,6 +392,9 @@ static int call_init(struct remote_process *remote,
                      struct elf_section *init_section, 
                      struct elf_section *initarray_section)
 {
+    UNUSED(remote);
+    UNUSED(init_section);
+    UNUSED(initarray_section);
 
     /* Remotely call the init functions. */
 
@@ -427,6 +429,8 @@ static int do_dynamic_linking(struct remote_process *remote,
     struct elf_section jmp_table = { 0 };
     struct elf_section init_section = { 0 };
     struct elf_section initarray_section = { 0 };
+
+    UNUSED(fini_vaddr);
 
     *depends_size = 0;
     *depends = NULL;
@@ -579,7 +583,7 @@ static int do_dynamic_linking(struct remote_process *remote,
         }
 
         ret = fix_relocations(remote, vaddr_base, &rel_table,
-                              symbol_table, sym_hashtable);
+                              symbol_table);
         if (ret < 0)
             goto unload;
     }
@@ -591,7 +595,7 @@ static int do_dynamic_linking(struct remote_process *remote,
         }
 
         ret = fix_relocations(remote, vaddr_base, &rela_table,
-                              symbol_table, sym_hashtable);
+                              symbol_table);
         if (ret < 0)
             goto unload;
     }
@@ -604,7 +608,7 @@ static int do_dynamic_linking(struct remote_process *remote,
         }
 
         ret = fix_relocations(remote, vaddr_base, &jmp_table,
-                              symbol_table, sym_hashtable);
+                              symbol_table);
         if (ret < 0)
             goto unload;
     }
@@ -641,13 +645,14 @@ fail:
     return ret;
 }
 
+/* TODO */
+#if 0
 static int collect_tls_info(struct remote_process *remote, 
                             Elf64_Ehdr *header,
                             uint64_t base_vaddr,
                             unsigned long dt_flags,
                             struct dyn_library_tls *tls)
 {
-    int ret = 0;
     Elf64_Phdr *program_header = NULL;    
     size_t num_phdrs = 0;
 
@@ -674,6 +679,7 @@ static int collect_tls_info(struct remote_process *remote,
 
     return 0;
 }
+#endif
 
 /*
  * Load library to the remote target. This function
@@ -702,7 +708,6 @@ int __load_library(struct remote_process *info, const char *path,
     struct elf_section string_table = { 0 };
     struct elf_section symbol_table = { 0 };
     struct elf_section sym_hashtable = { 0 };
-    struct dyn_library_tls tls = { 0 };
 
     *out_library = NULL;
 
@@ -748,11 +753,6 @@ int __load_library(struct remote_process *info, const char *path,
         break;
     }
 
-    if (ret < 0)
-        goto out;
-
-    /* TODO: Handle thread local storage. */
-    ret = collect_tls_info(info, header, (uint64_t) remote_map.addr, &tls);
     if (ret < 0)
         goto out;
 
@@ -885,16 +885,17 @@ out:
     return ret;
 }
 
+/* Testing. We currenty link as an executable. */
 int main(int argc, char **argv)
 {
     struct dyn_library *library;
 
-    if (argc < 2) {
-        printf("stealth <pid>\n");
+    if (argc < 3) {
+        printf("stealth <pid> <shared_object>\n");
         return -1;
     }
 
-    stealth_load_library(atoi(argv[1]), "/home/mike/foo.so", &library);
+    stealth_load_library(atoi(argv[1]), argv[2], &library);
     stealth_unload_library(library);
 
     return 0;

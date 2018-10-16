@@ -8,7 +8,6 @@ enum stealth_arg_type {
     STEALTH_ARG_INT16,
     STEALTH_ARG_INT32,
     STEALTH_ARG_INT64,
-    STEALTH_ARG_PTR,
 
     STEALTH_ARG_END
 };
@@ -43,13 +42,12 @@ int stealth_unload_library(struct dyn_library *library);
  *
  * @pid: pid of one of the remote threads.
  * @func_addr: virtual address of the function to call.
- * @num_args: the number of function arguments.
  * ...: a list of function arguments.
  *
  * Returns a negative errno(cast it to signed) value in case of a failure, 
  * or the actual remote function return value.
  */
 uint64_t stealth_call_remote_function(pid_t pid, uint64_t func_addr, 
-                                      int num_args, ...);
+                                      ...);
 
 #endif

@@ -15,47 +15,7 @@
 
 #include "util.h"
 #include "remote.h"
-
-
-/* Arch-specific external declarations */
-struct function_call;
-extern char syscall_stub[];
-extern int syscall_stub_size;
-
-/* 
- * Changes the instruction pointer to the stub address,
- * and marshall the system call arguments. 
- */
-extern int marshall_syscall(pid_t pid, uint64_t stub_address, 
-                                 uint32_t syscall_number, uint64_t arg1, 
-                                 uint64_t arg2, uint64_t arg3, uint64_t arg4, 
-                                 uint64_t arg5, uint64_t arg6);
-/* 
- * Returns the syscall return value(shocking..) 
- */
-extern long syscall_return_value(pid_t pid);
-/* 
- * Get a snapshot of the current remote process registers values. 
- */
-extern int get_remote_regs(pid_t pid, struct user_regs_struct **regs);
-/* 
- * Set the remote process registers values. 
- */
-extern int set_remote_regs(pid_t pid, struct user_regs_struct *regs);
-/*
- * Change the instruction pointer to the function address,
- * set the function return address, and marshall the function argumenst.
- */
-extern int wind_function_call(pid_t pid, uint64_t func_addr, uint64_t return_addr, 
-                              struct function_call **out_call, ...);
-/* 
- * Unwind whatever was winded for the function call. 
- */
-extern int unwind_function_call(pid_t pid, struct function_call *call);
-/*
- * Get the function return value. 
- */
-extern uint64_t get_function_return_value(pid_t pid);
+#include "stealth.h"
 
 /*
  * Assumes the tracee is in a trace-stop state(suspended)
@@ -153,8 +113,8 @@ static long do_remote_syscall(pid_t pid,
     if (ret < 0)
         goto out;
 
-    ret = marshall_syscall(pid, stub_address, syscall_number, 
-                           arg1, arg2, arg3, arg4, arg5, arg6);
+    ret = marshal_syscall(pid, stub_address, syscall_number, 
+                          arg1, arg2, arg3, arg4, arg5, arg6);
     if (ret < 0)
         goto out;
 
@@ -400,7 +360,7 @@ void fini_remote_process(struct remote_process *info)
     (void) waitpid(info->pid, NULL, 0);
 }
 
-uint64_t call_remote_function(pid_t pid, uint64_t func_addr, ...)
+uint64_t call_remote_function(struct remote_process *remote, uint64_t func_addr, ...)
 {
     uint64_t ret = 0;
     int err = 0;
@@ -409,7 +369,7 @@ uint64_t call_remote_function(pid_t pid, uint64_t func_addr, ...)
     struct function_call *call = NULL;
 
     va_start(args, func_addr);
-    err = wind_function_call(pid, func_addr, 0, &call, args);
+    err = wind_function_call(remote, func_addr, 0, &call, args);
     va_end(args);
     if (err < 0) {
         ret = (uint64_t) err;
@@ -417,7 +377,7 @@ uint64_t call_remote_function(pid_t pid, uint64_t func_addr, ...)
     }
 
     /* OK.. continue. */
-    err = ptrace(PTRACE_CONT, pid, NULL, NULL);
+    err = ptrace(PTRACE_CONT, remote->pid, NULL, NULL);
     if (err < 0) {
         ret = (uint64_t) err; 
         goto unwind;
@@ -425,7 +385,7 @@ uint64_t call_remote_function(pid_t pid, uint64_t func_addr, ...)
 
     /* Wait and catch a SIGSEGV. */
     for (;;) {
-        err = waitpid(pid, &status, 0);
+        err = waitpid(remote->pid, &status, 0);
         if (err == -1) {
             ret = (uint64_t) -errno;
             goto unwind;
@@ -445,7 +405,7 @@ uint64_t call_remote_function(pid_t pid, uint64_t func_addr, ...)
              * done with it. We're assuming this is indeed our SIGSEGV, 
              * and not the program's... if it is indeed the program's, 
              * it's a bug and we don't care. */
-            err = get_function_return_value(pid);
+            err = function_return_value(remote->pid);
             ret = (uint64_t) err;
 
             /* We're now in signal-delivery-stop. Supress the SIGSEGV
@@ -455,7 +415,7 @@ uint64_t call_remote_function(pid_t pid, uint64_t func_addr, ...)
     }
 
 unwind:
-    (void) unwind_function_call(pid, call);
+    (void) unwind_function_call(remote, call);
     free(call);
 out:
     return ret;
@@ -472,7 +432,7 @@ uint64_t stealth_call_remote_function(pid_t pid, uint64_t func_addr, ...)
         return ret;
 
     va_start(args, func_addr);
-    ret = call_remote_function(pid, func_addr, args);
+    ret = call_remote_function(&remote, func_addr, args);
     va_end(args);
 
     fini_remote_process(&remote);
