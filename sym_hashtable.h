@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) Mike Bazov
+ */
+
 #ifndef __SYM_HASHTABLE_H__
 #define  __SYM_HASHTABLE_H__
 

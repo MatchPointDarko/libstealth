@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) Mike Bazov
+ */
+
 #include <limits.h>
 #include <errno.h>
 #include <string.h>

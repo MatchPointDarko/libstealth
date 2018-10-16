@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) Mike Bazov
+ */
+
 #include <elf.h>
 #include <errno.h>
 #include <sys/stat.h>

@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) Mike Bazov
+ */
+
 #include <stdbool.h>
 #include <stdlib.h>
 #include <errno.h>

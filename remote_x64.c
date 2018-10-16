@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) Mike Bazov
+ */
+
 #include <unistd.h>
 #include <stdint.h>
 #include <stdlib.h>

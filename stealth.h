@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) Mike Bazov
+ */
+
 #ifndef __STEALTH_H__
 #define __STEALTH_H__
 

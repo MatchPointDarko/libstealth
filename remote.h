@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) Mike Bazov
+ */
+
 #ifndef __REMOTE_H__
 #define __REMOTE_H__
 

@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) Mike Bazov
+ */
+
 #ifndef __LOAD_LIBRARY_PRIV_H__
 #define  __LOAD_LIBRARY_PRIV_H__
 
